@@ -1,3 +1,5 @@
+该项目从哈工大社会计算与信息检索研究中心fork而来，里面加入了一些自己的修改，主要的计算图不变。
+
 Pre-trained ELMo Representations for Many Languages
 ===================================================
 
