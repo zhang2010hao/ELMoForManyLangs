@@ -15,13 +15,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
-from .modules.elmo import ElmobiLm
-from .modules.lstm import LstmbiLm
-from .modules.token_embedder import ConvTokenEmbedder, LstmTokenEmbedder
-from .modules.embedding_layer import EmbeddingLayer
-from .modules.classify_layer import SoftmaxLayer, CNNSoftmaxLayer, SampledSoftmaxLayer
-from .dataloader import load_embedding
-from .utils import dict2namedtuple
+from modules.elmo import ElmobiLm
+from modules.lstm import LstmbiLm
+from modules.token_embedder import ConvTokenEmbedder, LstmTokenEmbedder
+from modules.embedding_layer import EmbeddingLayer
+from modules.classify_layer import SoftmaxLayer, CNNSoftmaxLayer, SampledSoftmaxLayer
+from dataloader import load_embedding
+from utils import dict2namedtuple
 from collections import Counter
 import numpy as np
 
@@ -72,6 +72,7 @@ def read_corpus(path, max_chars=None, max_sent_len=20):
           token = token[:max_chars - 2]
         data.append(token)
       data.append('<eos>')
+
   dataset = break_sentence(data, max_sent_len)
   return dataset
 
@@ -175,30 +176,13 @@ def create_batches(x, batch_size, word2id, char2id, config, perm=None, shuffle=T
     lst.sort(key=lambda l: -len(x[l]))
 
   x = [x[i] for i in lst]
-
-  sum_len = 0.0
-  batches_w, batches_c, batches_lens, batches_masks = [], [], [], []
+  
   size = batch_size
   nbatch = (len(x) - 1) // size + 1
   for i in range(nbatch):
     start_id, end_id = i * size, (i + 1) * size
     bw, bc, blens, bmasks = create_one_batch(x[start_id: end_id], word2id, char2id, config, sort=sort)
-    sum_len += sum(blens)
-    batches_w.append(bw)
-    batches_c.append(bc)
-    batches_lens.append(blens)
-    batches_masks.append(bmasks)
-
-  if sort:
-    perm = list(range(nbatch))
-    random.shuffle(perm)
-    batches_w = [batches_w[i] for i in perm]
-    batches_c = [batches_c[i] for i in perm]
-    batches_lens = [batches_lens[i] for i in perm]
-    batches_masks = [batches_masks[i] for i in perm]
-
-  logging.info("{} batches, avg len: {:.1f}".format(nbatch, sum_len / len(x)))
-  return batches_w, batches_c, batches_lens, batches_masks
+    yield bw, bc, blens, bmasks
 
 
 class Model(nn.Module):
@@ -291,8 +275,8 @@ def eval_model(model, valid):
       model.config['classifier']['name'].lower() == 'sampled_softmax':
     model.classify_layer.update_embedding_matrix()
   total_loss, total_tag = 0.0, 0
-  valid_w, valid_c, valid_lens, valid_masks = valid
-  for w, c, lens, masks in zip(valid_w, valid_c, valid_lens, valid_masks):
+  # valid_w, valid_c, valid_lens, valid_masks = valid
+  for w, c, lens, masks in valid:
     loss_forward, loss_backward = model.forward(w, c, masks)
     total_loss += loss_forward.data[0]
     n_tags = sum(lens)
@@ -324,17 +308,7 @@ def train_model(epoch, opt, model, optimizer,
   cnt = 0
   start_time = time.time()
 
-  train_w, train_c, train_lens, train_masks = train
-
-  lst = list(range(len(train_w)))
-  random.shuffle(lst)
-  
-  train_w = [train_w[l] for l in lst]
-  train_c = [train_c[l] for l in lst]
-  train_lens = [train_lens[l] for l in lst]
-  train_masks = [train_masks[l] for l in lst]
-
-  for w, c, lens, masks in zip(train_w, train_c, train_lens, train_masks):
+  for w, c, lens, masks in train:
     cnt += 1
     model.zero_grad()
     loss_forward, loss_backward = model.forward(w, c, masks)
@@ -354,7 +328,7 @@ def train_model(epoch, opt, model, optimizer,
       ))
       start_time = time.time()
 
-    if cnt % opt.eval_steps == 0 or cnt % len(train_w) == 0:
+    if cnt % opt.eval_steps == 0:
       if valid is None:
         train_ppl = np.exp(total_loss / total_tag)
         logging.info("Epoch={} iter={} lr={:.6f} train_ppl={:.6f}".format(
@@ -548,24 +522,9 @@ def train():
     char_lexicon = None
     char_emb_layer = None
 
-  train = create_batches(
-    train_data, opt.batch_size, word_lexicon, char_lexicon, config, use_cuda=use_cuda)
-
   if opt.eval_steps is None:
-    opt.eval_steps = len(train[0])
+    opt.eval_steps = 10
   logging.info('Evaluate every {0} batches.'.format(opt.eval_steps))
-
-  if valid_data is not None:
-    valid = create_batches(
-      valid_data, opt.batch_size, word_lexicon, char_lexicon, config, sort=False, shuffle=False, use_cuda=use_cuda)
-  else:
-    valid = None
-
-  if test_data is not None:
-    test = create_batches(
-      test_data, opt.batch_size, word_lexicon, char_lexicon, config, sort=False, shuffle=False, use_cuda=use_cuda)
-  else:
-    test = None
 
   label_to_ix = word_lexicon
   logging.info('vocab size: {0}'.format(len(label_to_ix)))
@@ -609,6 +568,21 @@ def train():
   test_result = 1e+8
 
   for epoch in range(opt.max_epoch):
+    train = create_batches(
+      train_data, opt.batch_size, word_lexicon, char_lexicon, config, use_cuda=use_cuda)
+    if valid_data is not None:
+      valid = create_batches(
+        valid_data, opt.batch_size, word_lexicon, char_lexicon, config, sort=False, shuffle=False, use_cuda=use_cuda)
+    else:
+      valid = None
+
+    if test_data is not None:
+      test = create_batches(
+        test_data, opt.batch_size, word_lexicon, char_lexicon, config, sort=False, shuffle=False, use_cuda=use_cuda)
+    else:
+      test = None
+
+
     best_train, best_valid, test_result = train_model(epoch, opt, model, optimizer,
                                                       train, valid, test, best_train, best_valid, test_result)
     if opt.lr_decay > 0:
@@ -683,10 +657,10 @@ def test():
   else:
     raise ValueError('')
 
-  test_w, test_c, test_lens, test_masks = create_batches(
+  test_batches = create_batches(
     test, args.batch_size, word_lexicon, char_lexicon, config, sort=False, shuffle=False, use_cuda=use_cuda)
 
-  test_result = eval_model(model, (test_w, test_c, test_lens, test_masks))
+  test_result = eval_model(model, test_batches)
 
   logging.info("test_ppl={:.6f}".format(test_result))
 
